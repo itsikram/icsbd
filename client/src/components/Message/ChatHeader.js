@@ -4,13 +4,14 @@ import UserPP from '../UserPP';
 import { useSelector } from 'react-redux';
 import * as faceapi from "face-api.js";
 import { useParams, useLocation, Link, useNavigate } from 'react-router-dom';
-import Peer from 'simple-peer';
+// import Peer from 'simple-peer';
 import ModalContainer from '../modal/ModalContainer';
 import useIsMobile from '../../utils/useIsMobile';
 import api from '../../api/api';
 import checkImgLoading from '../../utils/checkImgLoading';
 import isValidUrl from '../../utils/isValiUrl';
-import Webcam from 'react-webcam';
+import AgoraRTC from 'agora-rtc-sdk-ng';
+import { fetchAgoraToken } from '../../api/agora';
 
 const ChatHeader = ({ friendProfile, isActive, room, lastSeen, friendProfilePic }) => {
     const [emotion, setEmotion] = useState(false);
@@ -23,7 +24,6 @@ const ChatHeader = ({ friendProfile, isActive, room, lastSeen, friendProfilePic 
     const [isBackCamera, setIsBackCamera] = useState(false);
     const [isCameraOn, setIsCameraOn] = useState(true);
     const [hasVideoInput, setHasVideoInput] = useState(true);
-    const [stream, setStream] = useState();
     const [callAccepted, setCallAccepted] = useState(false);
     const [me, setMe] = useState('');
     const [isChatOptionMenu, setIsChatOptionMenu] = useState(false);
@@ -35,7 +35,6 @@ const ChatHeader = ({ friendProfile, isActive, room, lastSeen, friendProfilePic 
     const location = useLocation();
     const myVideo = useRef();
     const userVideo = useRef();
-    const connectionRef = useRef();
     const callEndBtn = useRef();
     const callingBeepAudio = useRef();
     const isMobile = useIsMobile();
@@ -44,16 +43,27 @@ const ChatHeader = ({ friendProfile, isActive, room, lastSeen, friendProfilePic 
     const profile = useSelector(state => state.profile);
     const profileId = profile._id;
 
-    const handleMicrophoneClick = useCallback(() => {
-        setIsMicrophone(prev => !prev);
+    // Agora state
+    const rtcClientRef = useRef(null);
+    const localAudioTrackRef = useRef(null);
+    const localVideoTrackRef = useRef(null);
+    const localJoinedRef = useRef(false);
+    const remoteUserRef = useRef(null);
+
+    const handleMicrophoneClick = useCallback(async () => {
+        setIsMicrophone(prev => {
+            const next = !prev;
+            if (localAudioTrackRef.current) localAudioTrackRef.current.setEnabled(next);
+            return next;
+        });
     }, []);
 
-    const handleCameraToggle = useCallback(() => {
-        if (stream) {
-            stream.getVideoTracks().forEach(track => track.stop());
-        }
-        setIsCameraOn(prev => !prev);
-    }, [stream]);
+    const handleCameraToggle = useCallback(async () => {
+        if (!localVideoTrackRef.current) return;
+        const next = !isCameraOn;
+        await localVideoTrackRef.current.setEnabled(next);
+        setIsCameraOn(next);
+    }, [isCameraOn]);
 
     const closeVideoCall = () => { };
 
@@ -65,73 +75,129 @@ const ChatHeader = ({ friendProfile, isActive, room, lastSeen, friendProfilePic 
         callingBeepAudio?.current.pause();
     };
 
-    const callUser = (id) => {
-        // if (!stream) return;
-        const peerA = new Peer({
-            initiator: true,
-            trickle: false,
-            stream
-        });
+    // Agora helpers
+    const ensureRtcClient = useCallback(() => {
+        if (!rtcClientRef.current) {
+            rtcClientRef.current = AgoraRTC.createClient({ mode: 'rtc', codec: 'vp8' });
+        }
+        return rtcClientRef.current;
+    }, []);
 
-        peerA.on('signal', (data) => {
-            socket.emit('call-user', {
-                userToCall: id,
-                signalData: data,
-                from: me,
-                name: profile.fullName || '',
-                isVideoCall: true
-            });
-        });
-
-        peerA.on('stream', (currentStream) => {
-            userVideo.current.srcObject = currentStream;
-        });
-
-        connectionRef.current = peerA;
+    const getPreferredCameraId = async () => {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter(d => d.kind === 'videoinput');
+        const backCamera = videoDevices.find(d => /back|environment/i.test(d.label));
+        return isBackCamera && backCamera?.deviceId || videoDevices[0]?.deviceId;
     };
 
-    const answerCall = useCallback((data) => {
+    const startLocalTracks = useCallback(async () => {
+        try {
+            const deviceId = await getPreferredCameraId();
+            const tracks = await AgoraRTC.createMicrophoneAndCameraTracks(
+                isMicrophone ? {} : false,
+                isCameraOn ? (deviceId ? { cameraId: deviceId } : {}) : false
+            );
+            const [mic, cam] = tracks;
+            localAudioTrackRef.current = mic || null;
+            localVideoTrackRef.current = cam || null;
+            if (myVideo.current && cam) cam.play(myVideo.current);
+        } catch (err) {
+            console.error('Media error:', err);
+            setHasVideoInput(false);
+        }
+    }, [isBackCamera, isCameraOn, isMicrophone]);
+
+    const cleanupAgora = useCallback(async () => {
+        try {
+            if (localVideoTrackRef.current) {
+                localVideoTrackRef.current.stop();
+                localVideoTrackRef.current.close();
+            }
+            if (localAudioTrackRef.current) {
+                localAudioTrackRef.current.stop();
+                localAudioTrackRef.current.close();
+            }
+            localVideoTrackRef.current = null;
+            localAudioTrackRef.current = null;
+            if (rtcClientRef.current && localJoinedRef.current) {
+                await rtcClientRef.current.leave();
+            }
+            if (rtcClientRef.current) rtcClientRef.current.removeAllListeners();
+            localJoinedRef.current = false;
+        } catch (e) { }
+        if (myVideo.current) myVideo.current.srcObject = null;
+        if (userVideo.current) userVideo.current.srcObject = null;
+    }, []);
+
+    const subscribeRemote = useCallback(async (user) => {
+        const client = ensureRtcClient();
+        await client.subscribe(user, 'video').catch(() => {});
+        await client.subscribe(user, 'audio').catch(() => {});
+        if (userVideo.current && user.videoTrack) {
+            user.videoTrack.play(userVideo.current);
+        }
+        if (user.audioTrack) user.audioTrack.play();
+        remoteUserRef.current = user;
+    }, [ensureRtcClient]);
+
+    const joinAgoraChannel = useCallback(async (channelName) => {
+        const client = ensureRtcClient();
+        const myUid = profileId || String(Date.now());
+        const { appId, token } = await fetchAgoraToken(channelName, myUid, 'publisher');
+
+        client.on('user-published', async (user) => {
+            await subscribeRemote(user);
+        });
+        client.on('user-unpublished', () => { /* no-op */ });
+
+        await startLocalTracks();
+        const uid = await client.join(appId, channelName, token || null, myUid);
+        localJoinedRef.current = true;
+
+        if (localAudioTrackRef.current) await client.publish(localAudioTrackRef.current);
+        if (localVideoTrackRef.current) await client.publish(localVideoTrackRef.current);
+    }, [ensureRtcClient, profileId, startLocalTracks, subscribeRemote]);
+
+    const leaveAgoraChannel = useCallback(async () => {
+        await cleanupAgora();
+    }, [cleanupAgora]);
+
+    // Socket event handlers bridging to Agora
+    const callUser = (id) => {
+        const channelName = [me, id].sort().join('_');
+        socket.emit('call-user', {
+            userToCall: id,
+            signalData: { channelName },
+            from: me,
+            name: profile.fullName || '',
+            isVideo: true
+        });
+        // caller also joins channel and waits for remote publish
+        joinAgoraChannel(channelName).catch(console.error);
+    };
+
+    const answerCall = useCallback(async (data) => {
         setCallAccepted(true);
         stopCallingBeep();
-        const peerB = new Peer({
-            initiator: false,
-            trickle: false,
-            stream
-        });
-
-        peerB.on('signal', signal => {
-            socket.emit('answer-call', { signal, to: data.from });
-        });
-
-        peerB.on('stream', currentStream => {
-            userVideo.current.srcObject = currentStream;
-        });
-
-        peerB.signal(data.signal);
-        connectionRef.current = peerB;
-    }, [stream]);
+        const channelName = data?.signal?.channelName || [data.from, me].sort().join('_');
+        await joinAgoraChannel(channelName);
+    }, [joinAgoraChannel, me]);
 
     useEffect(() => {
-        socket.on('call-accepted', signal => {
+        socket.on('call-accepted', async (signal) => {
+            // no extra action needed for Agora once both join
             setCallAccepted(true);
             stopCallingBeep();
-            if (connectionRef.current && !connectionRef.current.destroyed) {
-                try {
-                    connectionRef.current.signal(signal);
-                } catch (err) {
-                    console.error("Error signaling accepted call:", err);
-                }
-            }
         });
 
-        socket.on('receive-call', data => {
+        socket.on('receive-call', async (data) => {
             setReceiverId(data.from);
             setIsVideoCalling(true);
             playCallingBeep();
-            answerCall(data);
+            await answerCall(data);
         });
 
-        socket.on('videoCallEnd', () => {
+        socket.on('videoCallEnd', async () => {
             callEndBtn.current?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: false }));
         });
 
@@ -145,54 +211,29 @@ const ChatHeader = ({ friendProfile, isActive, room, lastSeen, friendProfilePic 
     }, [answerCall]);
 
     useEffect(() => {
-        if (stream && receiverId && !connectionRef.current) callUser(receiverId);
-    }, [stream, receiverId]);
-
-    useEffect(() => {
-        if (isVideoCalling) {
-            navigator.mediaDevices.enumerateDevices().then(devices => {
-                const videoDevices = devices.filter(d => d.kind === 'videoinput');
-                const backCamera = videoDevices.find(d => /back|environment/i.test(d.label));
-                const deviceId = isBackCamera && backCamera?.deviceId || videoDevices[0]?.deviceId;
-
-                navigator.mediaDevices.getUserMedia({
-                    video: { deviceId },
-                    audio: isMicrophone
-                }).then(mediaStream => {
-                    setStream(mediaStream);
-                    if (myVideo.current) myVideo.current.srcObject = mediaStream;
-                });
-            });
+        if (isVideoCalling && !localJoinedRef.current) {
+            // local preview setup happens in joinAgoraChannel
         }
-    }, [isVideoCalling, isMicrophone]);
+    }, [isVideoCalling]);
 
     const handleVideoCallBtn = useCallback(e => {
         const id = e.currentTarget.dataset.id;
         setReceiverId(id);
         setIsVideoCalling(true);
         playCallingBeep();
-    }, []);
+        callUser(id);
+    }, [me]);
 
-    const handleLeaveCall = useCallback(() => {
+    const handleLeaveCall = useCallback(async () => {
         stopCallingBeep();
         socket.emit('leaveVideoCall', friendId);
-
-        stream?.getTracks().forEach(t => t.stop());
-        if (myVideo.current) myVideo.current.srcObject = null;
-        if (userVideo.current) userVideo.current.srcObject = null;
-
-        setStream(null);
+        await leaveAgoraChannel();
         setCallAccepted(false);
         setIsVideoCalling(false);
-
-        if (connectionRef.current) {
-            connectionRef.current.destroy();
-            connectionRef.current = null;
-        }
-    }, [friendId, stream]);
+    }, [friendId, leaveAgoraChannel]);
 
     const startVideo = () => {
-        if (!cameraVideoRef.current) return
+        if (!cameraVideoRef.current) return;
         navigator.mediaDevices.enumerateDevices().then(devices => {
             const videoDevices = devices.filter(d => d.kind === 'videoinput');
             const backCamera = videoDevices.find(d => /back|environment/i.test(d.label));
@@ -204,7 +245,6 @@ const ChatHeader = ({ friendProfile, isActive, room, lastSeen, friendProfilePic 
 
     const stopCamera = () => {
         if (!cameraVideoRef.current) return
-
         const stream = cameraVideoRef.current?.srcObject;
         stream?.getTracks().forEach(track => track.stop());
         cameraVideoRef.current.srcObject = null;
@@ -275,8 +315,15 @@ const ChatHeader = ({ friendProfile, isActive, room, lastSeen, friendProfilePic 
         };
     }, []);
 
-    const handleSwitchClick = useCallback(() => {
+    const handleSwitchClick = useCallback(async () => {
         setIsBackCamera(prev => !prev);
+        // switch camera device at runtime
+        try {
+            const deviceId = await getPreferredCameraId();
+            if (localVideoTrackRef.current && deviceId) {
+                await localVideoTrackRef.current.setDevice(deviceId);
+            }
+        } catch (e) { }
     }, []);
 
     const chatOptionMenu = useRef(null);
@@ -419,8 +466,8 @@ const ChatHeader = ({ friendProfile, isActive, room, lastSeen, friendProfilePic 
                         </p>
                         <div className={`video-call-container ${isMobile ? 'mobile' : ''}`}>
                             {<video playsInline ref={userVideo} className='friends-video' autoPlay style={{ width: '100%', display: callAccepted ? 'block' : 'none' }} />}
-                            <Webcam playsInline muted ref={myVideo} autoPlay className='my-video' style={{ width: '150px' }} />
-                            {/* <video playsInline muted ref={myVideo} autoPlay className='my-video' style={{ width: '150px' }} /> */}
+                            {/* Use a div for Agora local video track playback */}
+                            <div className='my-video' style={{ width: '150px' }} ref={myVideo} />
                         </div>
                         <div className='call-buttons'>
 
@@ -429,7 +476,7 @@ const ChatHeader = ({ friendProfile, isActive, room, lastSeen, friendProfilePic 
                             </button>
                             {
                                 callAccepted && <>
-                                    <button onClick={handleMicrophoneClick.bind(this)} className='call-button-microphone call-button'>
+                                    <button onClick={handleMicrophoneClick} className='call-button-microphone call-button'>
                                         {
                                             isMicrophone ? <i className="fa fa-microphone"></i> : <i className="fa fa-microphone-slash"></i>
                                         }
@@ -439,7 +486,7 @@ const ChatHeader = ({ friendProfile, isActive, room, lastSeen, friendProfilePic 
                                             {isCameraOn ? <i className="fa fa-video" /> : <i className="fa fa-video-slash" />}
                                         </button>
                                     )}
-                                    <button onClick={handleSwitchClick.bind(this)} className='call-button-switch call-button'>
+                                    <button onClick={handleSwitchClick} className='call-button-switch call-button'>
                                         <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"
                                             stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
                                             <path d="M11 7H5a2 2 0 0 0-2 2v4" />

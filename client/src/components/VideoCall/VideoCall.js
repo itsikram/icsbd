@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import socket from '../../common/socket';
 import ModalContainer from '../modal/ModalContainer';
-import Peer from 'simple-peer';
+// import Peer from 'simple-peer';
 import { useSelector } from 'react-redux';
 import useIsMobile from '../../utils/useIsMobile';
 import ringtones from '../../config/ringtones.json';

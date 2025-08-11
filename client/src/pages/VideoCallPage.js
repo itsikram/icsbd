@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import io from "socket.io-client";
-import Peer from "simple-peer";
+// import Peer from "simple-peer";
 
 const socket = io("http://localhost:5000");
 
@@ -37,26 +37,11 @@ const VideoCallPage = () => {
     });
 
     socket.on("receive-call", ({ signal, from }) => {
-      const incomingPeer = new Peer({
-        initiator: false,
-        trickle: false,
-        stream,
-      });
-
-      incomingPeer.on("signal", (signal) => {
-        socket.emit("answer-call", { signal, to: from });
-      });
-
-      incomingPeer.on("stream", (remoteStream) => {
-        userVideo.current.srcObject = remoteStream;
-      });
-
-      incomingPeer.signal(signal);
-      setPeer(incomingPeer);
+      // agora based flow now, ignore here
     });
 
     socket.on("call-answered", ({ signal }) => {
-      peer?.signal(signal);
+      // agora based flow now, ignore here
     });
 
     return () => socket.disconnect();
@@ -76,21 +61,7 @@ const VideoCallPage = () => {
   };
 
   const callUser = () => {
-    const newPeer = new Peer({
-      initiator: true,
-      trickle: false,
-      stream,
-    });
-
-    newPeer.on("signal", (signal) => {
-      socket.emit("call-user", { signal, to: otherID });
-    });
-
-    newPeer.on("stream", (remoteStream) => {
-      userVideo.current.srcObject = remoteStream;
-    });
-
-    setPeer(newPeer);
+    // Agora flow handled in Chat UI
   };
 
   const toggleVideo = () => {

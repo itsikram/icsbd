@@ -13,13 +13,14 @@ const messageRoutes = require('./messageRoutes')
 const searchRoutes = require('./searchRoutes')
 const path = require('path')
 const watchRoutes = require('./watchRoutes')
-
+const agoraRoutes = require('./agoraRoutes')
+ 
 let rootRoute = async (req,res) => {
     return res.sendFile(path.join(__dirname, "build", "index.html"));
-
+ 
 }
 const routes = [
-
+ 
     {
         path: '/api/auth',
         handler: authRoutes
@@ -69,13 +70,17 @@ const routes = [
     {
         path: '/api/watch',
         handler: watchRoutes
+    },
+    {
+        path: '/api/agora',
+        handler: agoraRoutes
     }
 ]
-
+ 
 module.exports = app => {
-
+ 
     routes.forEach(r => {
-
+ 
         app.use(r.path,r.handler)
         
     })

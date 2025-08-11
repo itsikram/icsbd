@@ -37,7 +37,7 @@ module.exports = function socketHandler(io) {
         socket.on('call-user', (data) => {
 
             io.to(data.userToCall).emit('receive-call', {
-                signal: data.signalData,
+                signal: data.signalData, // { channelName } for Agora
                 from: data.from,
                 name: data.name,
                 isVideo: data.isVideo
